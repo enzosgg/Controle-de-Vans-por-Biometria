@@ -14,15 +14,12 @@ import json
 @login_required
 def dashboard(request):
     """Dashboard principal do motorista"""
-    print("=== Acessando Dashboard ===")  # Para debug
+    print("=== Acessando Dashboard ===")
     print(f"Usuário: {request.user}")
 
     rotas_ativas = SessaoRota.objects.filter(status='ATIVA')
     rotas_finalizadas = SessaoRota.objects.filter(status='FINALIZADA')[:10]
 
-    print(f"Rotas ativas: {rotas_ativas.count()}")
-    print(f"Rotas finalizadas: {rotas_finalizadas.count()}")
-    
     context = {
         'rotas_ativas': rotas_ativas,
         'rotas_finalizadas': rotas_finalizadas,
@@ -63,11 +60,9 @@ def checkin_aluno(request, sessao_id):
         responsavel = request.POST.get('responsavel', '')
         telefone = request.POST.get('telefone', '')
         
-        # Gerar ID temporário se não fornecido
         if not aluno_id:
             aluno_id = str(uuid.uuid4())[:8]
         
-        # Verificar se já existe registro nesta sessão
         registro, created = RegistroAluno.objects.get_or_create(
             sessao_rota=sessao,
             aluno_id_temporario=aluno_id,
@@ -78,11 +73,8 @@ def checkin_aluno(request, sessao_id):
             }
         )
         
-        # Verificar método de autenticação
         if metodo == 'PALMA':
-           
             template_json = request.POST.get('dados_palma')
-            
             if template_json and 'landmarks' in template_json:
                 registro.palm_template = template_json
             else:
@@ -94,13 +86,11 @@ def checkin_aluno(request, sessao_id):
             if qrcode_data:
                 registro.qrcode_data = qrcode_data
         
-        # Registrar check-in
         registro.checkin_realizado = True
         registro.horario_checkin = timezone.now()
         registro.metodo_checkin = metodo
         registro.save()
         
-        # Gerar QR Code para o aluno (se necessário)
         qrcode_img = None
         if metodo == 'QRCODE':
             qrcode_img = qrcode_utils.gerar_qrcode(registro.aluno_id_temporario)
@@ -112,7 +102,6 @@ def checkin_aluno(request, sessao_id):
         
         return redirect('checkin_aluno', sessao_id=sessao_id)
     
-    # GET - mostrar lista de alunos já registrados
     registros = sessao.registros.filter(checkin_realizado=True)
     
     context = {
@@ -138,12 +127,9 @@ def checkout_escola(request, sessao_id):
             
             messages.success(request, f'Check-out realizado: {registro.nome_aluno}')
             
-            # Verificar divergência após cada checkout
             divergencia = sessao.get_divergencia()
             if divergencia > 0:
-                # Emitir alerta sonoro/luminoso via JavaScript
-                messages.warning(request, f'ATENÇÃO: {divergencia} aluno(s) ainda não fizeram check-out! Verifique a van!')
-                # Registrar ocorrência
+                messages.warning(request, f'ATENÇÃO: {divergencia} aluno(s) ainda não fizeram check-out!')
                 verificar_esquecimento(sessao)
             
         except RegistroAluno.DoesNotExist:
@@ -151,7 +137,6 @@ def checkout_escola(request, sessao_id):
         
         return redirect('checkout_escola', sessao_id=sessao_id)
     
-    # GET - mostrar alunos que fizeram check-in mas ainda não checkout
     registros = sessao.registros.filter(checkin_realizado=True, checkout_realizado=False)
     
     context = {
@@ -168,15 +153,15 @@ def finalizar_rota(request, sessao_id):
     """Finaliza uma rota e verifica divergências finais"""
     sessao = get_object_or_404(SessaoRota, id=sessao_id)
     
-    # Se for POST, processa a finalização
     if request.method == 'POST':
         divergencia = sessao.get_divergencia()
+        # Adicionado: Captura o motivo enviado pelo formulário de alerta da página anterior
+        motivo = request.POST.get('motivo')
         
-        if divergencia > 0:
-            # Registrar ocorrência grave
+        # Modificado: Só entra na tela de alerta se houver divergência E o motivo ainda não tiver sido preenchido
+        if divergencia > 0 and not motivo:
             mensagem = f"ALERTA GRAVE: Rota {sessao.nome_rota} finalizada com {divergencia} aluno(s) sem check-out!"
             
-            # Salvar ocorrência
             from apps.ocorrencias.models import Ocorrencia
             Ocorrencia.objects.create(
                 tipo='ESQUECIMENTO_VAN' if sessao.tipo == 'IDA' else 'ESQUECIMENTO_ESCOLA',
@@ -186,13 +171,22 @@ def finalizar_rota(request, sessao_id):
             )
             
             messages.error(request, mensagem)
-            
-            # Mostrar template de alerta
             return render(request, 'checkin/alerta_esquecimento.html', {
                 'sessao': sessao,
                 'divergencia': divergencia
             })
         
+        # Adicionado: Se existir motivo, criamos uma ocorrência final detalhada ou atualizamos a anterior
+        if motivo:
+            from apps.ocorrencias.models import Ocorrencia
+            Ocorrencia.objects.create(
+                tipo='DIVERGENCIA_CONFIRMADA',
+                sessao_rota_id=str(sessao.id),
+                mensagem=f"Rota finalizada com {divergencia} pendências. Motivo declarado: {motivo}",
+                telefone_destino=''
+            )
+
+        # Modificado: Agora esta parte é alcançada se divergencia == 0 OU se o motivo foi enviado (confirmação)
         sessao.status = 'FINALIZADA'
         sessao.data_fim = timezone.now()
         sessao.save()
@@ -200,7 +194,6 @@ def finalizar_rota(request, sessao_id):
         messages.success(request, f'Rota "{sessao.nome_rota}" finalizada com sucesso!')
         return redirect('dashboard')
     
-    # Se for GET, mostra a página de confirmação
     context = {
         'sessao': sessao,
         'total_checkins': sessao.get_total_checkins(),
@@ -224,67 +217,52 @@ def listar_rotas(request):
 @login_required
 @csrf_exempt
 def api_capturar_palma(request):
-    """API para capturar palma da mão via câmera do celular"""
     if request.method == 'POST':
         try:
-            import json
             dados = json.loads(request.body)
             imagem_base64 = dados.get('imagem')
-            
             if imagem_base64:
                 template = palm_recognition.extract_features(imagem_base64)
                 if template:
                     return JsonResponse({'success': True, 'template': template})
                 else:
                     return JsonResponse({'success': False, 'error': 'Mão não detectada'})
-            
         except Exception as e:
             return JsonResponse({'success': False, 'error': str(e)})
-    
     return JsonResponse({'success': False, 'error': 'Método não permitido'})
 
 @csrf_exempt
 def api_sensor_status(request):
-    """Retorna o status do sensor biométrico"""
     return JsonResponse({
-        'ativo': True,  # Mudar para True quando o sensor estiver disponível
+        'ativo': True,
         'tipo': 'palma',
-        'mensagem': 'Sensor em desenvolvimento - Disponível em breve',
+        'mensagem': 'Sensor em desenvolvimento',
         'versao_api': '1.0.0'
     })
 
 @csrf_exempt
 def api_ler_biometria(request):
-    """Realiza a comparação do template de uma mão com as registradas na sessão"""
     if request.method == 'POST':
         try:
-            import json
-            from django.shortcuts import get_object_or_404
-            
             dados = json.loads(request.body)
             template_atual = dados.get('template')
             sessao_id = dados.get('sessao_id')
             
             if not template_atual or not sessao_id:
-                return JsonResponse({
-                    'success': False, 
-                    'error': 'Dados incompletos. Necessário template e ID da sessão.'
-                })
+                return JsonResponse({'success': False, 'error': 'Dados incompletos.'})
                 
             sessao = get_object_or_404(SessaoRota, id=sessao_id)
-            
             alunos_na_van = sessao.registros.filter(checkin_realizado=True, checkout_realizado=False)
             
             for registro in alunos_na_van:
                 match, score = palm_recognition.compare_templates(template_atual, registro.palm_template)
-                
                 if match:
                     return JsonResponse({
                         'success': True, 
                         'aluno_id': registro.aluno_id_temporario,
                         'nome_aluno': registro.nome_aluno
                     })
-                    
+            
             if alunos_na_van.exists():
                 primeiro_aluno = alunos_na_van.first()
                 return JsonResponse({
@@ -293,9 +271,7 @@ def api_ler_biometria(request):
                     'nome_aluno': f"{primeiro_aluno.nome_aluno} (Match Simulado)"
                 })
 
-            return JsonResponse({'success': False, 'error': 'Aluno não reconhecido ou já desembarcado.'})
-            
+            return JsonResponse({'success': False, 'error': 'Aluno não reconhecido.'})
         except Exception as e:
             return JsonResponse({'success': False, 'error': str(e)})
-            
     return JsonResponse({'error': 'Método não permitido'}, status=405)
